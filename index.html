@@ -477,58 +477,85 @@
         let waveAmplitude = 0;
         let uploadedFile = null;
         let canvasSize = { width: 450, height: 450 };
+        let audioContext = null;
+        let analyser = null;
+        let microphone = null;
+        let isRecordingAudio = false;
 
         // ==================== SPEECH RECOGNITION SETUP ====================
-        if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-            recognition = new SpeechRecognition();
-            recognition.continuous = true;
-            recognition.interimResults = false;
-            recognition.lang = 'en-US';
+        function initSpeechRecognition() {
+            if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+                const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+                recognition = new SpeechRecognition();
+                recognition.continuous = true;
+                recognition.interimResults = false;
+                recognition.lang = 'en-US';
 
-            recognition.onresult = (event) => {
-                const transcript = event.results[event.results.length - 1][0].transcript.toLowerCase();
-                console.log('Heard:', transcript);
-                
-                if (transcript.includes('hey alex') || transcript.includes('hi alex') || 
-                    transcript.includes('hello alex') || transcript.includes('ok alex')) {
+                recognition.onstart = () => {
+                    console.log('Speech recognition started');
+                    updateStatus('Listening for "Alex"...', 'listening');
+                };
+
+                recognition.onresult = (event) => {
+                    const transcript = event.results[event.results.length - 1][0].transcript.trim();
+                    console.log('Heard:', transcript);
                     
-                    if (isSpeaking) {
-                        stopSpeaking();
-                    }
+                    const lowerTranscript = transcript.toLowerCase();
                     
-                    addMessage('User', transcript);
-                    
-                    let command = transcript.split('hey alex')[1] || 
-                                  transcript.split('hi alex')[1] || 
-                                  transcript.split('hello alex')[1] ||
-                                  transcript.split('ok alex')[1] || '';
-                    command = command.trim();
-                    
-                    if (command) {
-                        processCommand(command);
+                    // Check if starts with wake word "Alex"
+                    if (lowerTranscript.startsWith('alex')) {
+                        if (isSpeaking) {
+                            stopSpeaking();
+                        }
+                        
+                        addMessage('User', transcript);
+                        
+                        // Extract command after "Alex"
+                        let command = transcript.substring(5).trim(); // Remove "Alex" or "alex"
+                        
+                        if (command) {
+                            processCommand(command);
+                        } else {
+                            speak('Yes, how can I help you?');
+                        }
                     } else {
-                        speak('Yes, how can I help you?');
+                        // Ignore commands that don't start with "Alex"
+                        console.log('Ignored - did not start with "Alex":', transcript);
                     }
-                }
-            };
+                };
 
-            recognition.onerror = (event) => {
-                if (event.error !== 'no-speech') {
+                recognition.onerror = (event) => {
                     console.error('Speech recognition error:', event.error);
-                }
-            };
-
-            recognition.onend = () => {
-                if (isListening) {
-                    try {
-                        recognition.start();
-                    } catch (e) {
-                        console.log('Recognition restart attempted');
+                    if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+                        addMessage('System', '⚠️ Microphone access denied. Please allow microphone permissions.');
+                        speak('Microphone access is required for voice commands');
+                        isListening = false;
+                        const btn = document.getElementById('listenBtn');
+                        btn.textContent = '🎤 Listen';
+                        btn.className = 'btn btn-listen';
+                        updateStatus('Ready', 'idle');
                     }
-                }
-            };
+                };
+
+                recognition.onend = () => {
+                    console.log('Speech recognition ended');
+                    if (isListening) {
+                        setTimeout(() => {
+                            try {
+                                recognition.start();
+                            } catch (e) {
+                                console.log('Restarting recognition...');
+                            }
+                        }, 100);
+                    }
+                };
+            } else {
+                console.error('Speech recognition not supported');
+            }
         }
+
+        // Initialize on page load
+        initSpeechRecognition();
 
         // ==================== PARTICLE INITIALIZATION ====================
         function initParticles() {
@@ -636,17 +663,26 @@
 
             ctx.clearRect(0, 0, width, height);
 
-            if (isSpeaking || isListening) {
+            // Get audio level if microphone is active
+            if (isRecordingAudio && analyser) {
+                const dataArray = new Uint8Array(analyser.frequencyBinCount);
+                analyser.getByteFrequencyData(dataArray);
+                const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+                waveAmplitude = Math.min(30, (average / 255) * 40);
+            } else if (isSpeaking) {
                 waveAmplitude = 20 + 10 * Math.sin(Date.now() / 100);
+            } else if (isListening) {
+                waveAmplitude = 5 + 3 * Math.sin(Date.now() / 200);
             } else {
                 waveAmplitude = Math.max(0, waveAmplitude - 1);
             }
 
-            ctx.strokeStyle = '#00ffff';
+            // Draw wave
+            ctx.strokeStyle = isRecordingAudio ? '#00ff00' : (isSpeaking ? '#ff00ff' : '#00ffff');
             ctx.lineWidth = 2;
             ctx.beginPath();
 
-            for (let x = 0; x < width; x += 5) {
+            for (let x = 0; x < width; x += 3) {
                 const y = centerY + waveAmplitude * Math.sin(x / 20 + Date.now() / 200);
                 if (x === 0) {
                     ctx.moveTo(x, y);
@@ -656,6 +692,19 @@
             }
 
             ctx.stroke();
+            
+            // Draw mirror wave
+            ctx.beginPath();
+            for (let x = 0; x < width; x += 3) {
+                const y = centerY - waveAmplitude * Math.sin(x / 20 + Date.now() / 200);
+                if (x === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            }
+            ctx.stroke();
+
             requestAnimationFrame(animateWave);
         }
 
@@ -706,18 +755,63 @@
             if (isListening) {
                 btn.textContent = '🔴 Listening';
                 btn.className = 'btn btn-listening';
-                updateStatus('Listening...', 'listening');
+                updateStatus('Listening for "Alex"...', 'listening');
+                
+                // Start microphone for wave animation
+                startMicrophone();
+                
                 try {
                     recognition.start();
+                    speak('Listening activated. Say Alex followed by your command.');
                 } catch (e) {
-                    console.log('Recognition already started');
+                    console.log('Recognition start error:', e);
                 }
             } else {
                 btn.textContent = '🎤 Listen';
                 btn.className = 'btn btn-listen';
                 updateStatus('Ready', 'idle');
-                recognition.stop();
+                
+                // Stop microphone
+                stopMicrophone();
+                
+                try {
+                    recognition.stop();
+                } catch (e) {
+                    console.log('Recognition stop error:', e);
+                }
             }
+        }
+
+        // ==================== MICROPHONE FOR WAVE ANIMATION ====================
+        async function startMicrophone() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioContext.createAnalyser();
+                microphone = audioContext.createMediaStreamSource(stream);
+                analyser.fftSize = 256;
+                microphone.connect(analyser);
+                isRecordingAudio = true;
+                console.log('Microphone started for wave animation');
+            } catch (error) {
+                console.error('Microphone access error:', error);
+                addMessage('System', '⚠️ Could not access microphone for wave animation');
+            }
+        }
+
+        function stopMicrophone() {
+            if (microphone) {
+                microphone.disconnect();
+                microphone = null;
+            }
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            analyser = null;
+            isRecordingAudio = false;
+            waveAmplitude = 0;
+            console.log('Microphone stopped');
         }
 
         // ==================== CHAT FUNCTIONS ====================
@@ -928,27 +1022,18 @@
             statusEl.innerHTML = 'Status: Thinking... <span class="loading"></span>';
 
             try {
-                // Add system prompt for advanced capabilities
+                // Simplified system prompt for faster responses
                 const systemPrompt = {
                     role: 'system',
-                    content: `You are Alex, an advanced AI assistant with human-like intelligence. You can:
-- Write code in any programming language
-- Explain complex concepts clearly
-- Solve mathematical problems
-- Provide creative ideas and stories
-- Give practical advice and help
-- Analyze data and files
-- Be conversational and friendly
-
-Always provide detailed, accurate, and helpful responses. Format code with markdown code blocks using triple backticks.`
+                    content: `You are Alex, an advanced AI assistant. Be concise, accurate, and helpful. Format code with markdown code blocks.`
                 };
 
-                // Build conversation with system prompt
+                // Build conversation with limited history for speed
                 const messages = [systemPrompt];
                 
-                // Add recent conversation history
+                // Only include last 4 exchanges for faster processing
                 if (conversationHistory.length > 0) {
-                    messages.push(...conversationHistory.slice(-10));
+                    messages.push(...conversationHistory.slice(-8));
                 }
                 
                 messages.push({
@@ -966,7 +1051,8 @@ Always provide detailed, accurate, and helpful responses. Format code with markd
                         model: 'mistral-large-latest',
                         messages: messages,
                         temperature: 0.7,
-                        max_tokens: 4000
+                        max_tokens: 2000,  // Reduced for faster responses
+                        stream: false
                     })
                 });
 
@@ -976,6 +1062,11 @@ Always provide detailed, accurate, and helpful responses. Format code with markd
 
                 const data = await response.json();
                 const aiResponse = data.choices[0].message.content;
+
+                // Keep only recent history to reduce payload size
+                if (conversationHistory.length > 16) {
+                    conversationHistory = conversationHistory.slice(-16);
+                }
 
                 conversationHistory.push({
                     role: 'user',
@@ -988,10 +1079,10 @@ Always provide detailed, accurate, and helpful responses. Format code with markd
 
                 addMessage('Alex', aiResponse);
                 
-                // Speak summary for long responses
-                const speakText = aiResponse.length > 300 
-                    ? aiResponse.substring(0, 300) + '... Response is complete in the chat.'
-                    : aiResponse.replace(/```[\s\S]*?```/g, 'Code snippet provided.');
+                // Speak concise summary for long responses
+                const speakText = aiResponse.length > 200 
+                    ? aiResponse.substring(0, 200).split('.')[0] + '. Check chat for full response.'
+                    : aiResponse.replace(/```[\s\S]*?```/g, 'Code provided in chat.');
                 
                 speak(speakText);
                 updateStatus(isListening ? 'Listening...' : 'Ready', isListening ? 'listening' : 'idle');
@@ -1022,8 +1113,9 @@ Always provide detailed, accurate, and helpful responses. Format code with markd
             updateStatus('Analyzing file...', 'thinking');
 
             try {
-                const fileContent = uploadedFile.content.substring(0, 15000);
-                const prompt = `File Name: ${uploadedFile.name}\n\nFile Content:\n${fileContent}\n\nUser Question: ${question}\n\nPlease analyze the file and answer the question in detail.`;
+                // Reduced file content size for faster processing
+                const fileContent = uploadedFile.content.substring(0, 8000);
+                const prompt = `File: ${uploadedFile.name}\n\n${fileContent}\n\nQuestion: ${question}\n\nAnswer concisely.`;
 
                 const response = await fetch('https://api.mistral.ai/v1/chat/completions', {
                     method: 'POST',
@@ -1037,7 +1129,7 @@ Always provide detailed, accurate, and helpful responses. Format code with markd
                             { role: 'user', content: prompt }
                         ],
                         temperature: 0.5,
-                        max_tokens: 4000
+                        max_tokens: 1500  // Reduced for speed
                     })
                 });
 
@@ -1049,7 +1141,7 @@ Always provide detailed, accurate, and helpful responses. Format code with markd
                 const aiResponse = data.choices[0].message.content;
 
                 addMessage('Alex', aiResponse);
-                speak('File analysis complete. Check the chat for details.');
+                speak('File analysis complete.');
                 updateStatus(isListening ? 'Listening...' : 'Ready', isListening ? 'listening' : 'idle');
             } catch (error) {
                 const errorMsg = 'Error analyzing file. Please try again.';
@@ -1113,7 +1205,7 @@ Always provide detailed, accurate, and helpful responses. Format code with markd
         window.addEventListener('load', () => {
             setTimeout(() => {
                 if (MISTRAL_API_KEY && MISTRAL_API_KEY !== 'YOUR_MISTRAL_API_KEY_HERE') {
-                    addMessage('System', '✅ Alex AI is ready! Say "Hey Alex" to start or type your message below.');
+                    addMessage('System', '✅ Alex AI is ready! Say "Alex" followed by your command, or type below.');
                     addMessage('Alex', `Hello! I'm Alex, your advanced AI assistant. I can help you with:
                     
 • Writing code in any programming language
@@ -1124,7 +1216,15 @@ Always provide detailed, accurate, and helpful responses. Format code with markd
 • Creative writing and brainstorming
 • And much more!
 
-Just say "Hey Alex" followed by your command, or type in the chat. Try asking me anything!`);
+To use voice commands, click the "Listen" button and say "Alex" followed by your command. 
+
+Examples:
+- "Alex, write a Python function"
+- "Alex, open YouTube"
+- "Alex, search for AI tutorials"
+- "Alex, what's the time?"
+
+Try it now!`);
                 } else {
                     addMessage('System', '⚠️ Please add your Mistral API key in the code (line 244). Get your key from: https://console.mistral.ai/');
                     speak('Please configure your Mistral API key to activate all features');
